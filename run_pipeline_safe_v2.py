@@ -1,13 +1,4 @@
 #!/usr/bin/env python3
-"""Safe AI Media Watch pipeline v2.
-
-It prevents old latest_run.json from being reused.
-If parser does not create runs/latest_run.json, this script creates it from
-new run folders created/modified during this execution.
-
-Run:
-  .venv/bin/python run_pipeline_safe_v2.py
-"""
 
 from __future__ import annotations
 
@@ -53,7 +44,7 @@ def find_newest_run_dir_after(output_dir: str, started_at: float) -> Optional[Pa
         results_path = d / results_name
         if not results_path.exists():
             continue
-        # Use folder or results file modification time.
+
         mtime = max(d.stat().st_mtime, results_path.stat().st_mtime)
         if mtime >= started_at - 5:
             candidates.append((mtime, d))

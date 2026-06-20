@@ -1,18 +1,4 @@
 #!/usr/bin/env python3
-"""Upload latest AI Media Watch JSON run into Supabase.
-
-Usage:
-  .venv/bin/python upload_run_to_supabase.py
-
-Required .env:
-  SUPABASE_URL=https://xxxxx.supabase.co
-  SUPABASE_SERVICE_ROLE_KEY=xxxxx
-
-Optional .env:
-  RUNS_LATEST_JSON=runs/latest_run.json
-  RUN_DIR=runs/20260618_101530
-  SUPABASE_BATCH_SIZE=100
-"""
 
 from __future__ import annotations
 
@@ -89,7 +75,7 @@ def clean_timestamptz(value: Any) -> Optional[str]:
         return None
     if not isinstance(value, str):
         return None
-    # YouTube timestamps are already RFC3339. Some SerpAPI dates are natural language; skip those.
+
     if "T" in value and (value.endswith("Z") or "+" in value or value.count(":") >= 2):
         return value
     return None
@@ -101,7 +87,6 @@ def chunks(rows: List[Dict[str, Any]], size: int) -> Iterable[List[Dict[str, Any
 
 
 def find_latest_run_dir(output_dir: str = "runs") -> Optional[Path]:
-    """Find newest run folder even if runs/latest_run.json was not created."""
     root = Path(output_dir)
     if not root.exists():
         return None
@@ -129,7 +114,7 @@ def resolve_run_paths() -> Tuple[str, Path, Path, Optional[Path], Optional[Path]
         raw_path = run_dir / env_str("RAW_OUTPUT_JSON", "ai_media_watch_raw.json")
         openai_path = run_dir / env_str("OPENAI_OUTPUT_JSON", "openai_risk_analysis.json")
         if not openai_path.exists():
-            openai_path = None  # type: ignore[assignment]
+            openai_path = None
         return run_id, results_path, raw_path, openai_path, latest_json
 
     if latest_json.exists():
@@ -145,7 +130,7 @@ def resolve_run_paths() -> Tuple[str, Path, Path, Optional[Path], Optional[Path]
         print("Parser did not create a new latest_run.json, so upload is stopped to avoid sending old data.")
         sys.exit(1)
 
-    # Auto-fallback: latest_run.json is missing, but run folders exist.
+
     auto_run_dir = find_latest_run_dir(output_dir)
     if auto_run_dir:
         run_id = auto_run_dir.name
@@ -155,8 +140,8 @@ def resolve_run_paths() -> Tuple[str, Path, Path, Optional[Path], Optional[Path]
         raw_path = auto_run_dir / env_str("RAW_OUTPUT_JSON", "ai_media_watch_raw.json")
         openai_path = auto_run_dir / env_str("OPENAI_OUTPUT_JSON", "openai_risk_analysis.json")
         if not openai_path.exists():
-            openai_path = None  # type: ignore[assignment]
-        # Re-create latest_run.json for next time.
+            openai_path = None
+
         latest_payload = {
             "run_id": run_id,
             "run_dir": str(auto_run_dir),
@@ -208,11 +193,6 @@ def build_rows(run_id: str, results: Dict[str, Any], model: str, openai_items: L
     run_item_rows: List[Dict[str, Any]] = []
     analysis_rows: List[Dict[str, Any]] = []
 
-    # Map OpenAI output by url hash; fallback by rank if URL is absent.
-    ai_by_url_hash: Dict[str, Dict[str, Any]] = {}
-    for ai in openai_items:
-        h = item_key(ai)
-        ai_by_url_hash[h] = ai
 
     for idx, item in enumerate(results.get("items", []), start=1):
         h = item_key(item)

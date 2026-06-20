@@ -1,17 +1,4 @@
 #!/usr/bin/env python3
-"""Run parser and AI worker concurrently.
-
-The parser streams candidates into Supabase. The worker reads pending rows from
-media_items and writes ai_analyses while parsing is still running.
-
-Run:
-  .venv/bin/python run_streaming_pipeline.py
-
-Useful env:
-  PARSER_SCRIPT=parser_focus.py
-  AI_WORKER_SCRIPT=ai_worker.py
-  AI_WORKER_KEEP_RUNNING=false
-"""
 
 from __future__ import annotations
 
@@ -94,6 +81,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    # Let Ctrl+C reach children in normal terminals.
+
     signal.signal(signal.SIGINT, signal.default_int_handler)
     main()

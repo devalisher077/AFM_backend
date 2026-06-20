@@ -1,9 +1,4 @@
 #!/usr/bin/env python3
-"""Streaming Supabase helpers for AI Media Watch.
-
-Used by the parser to upsert discovered candidates while a run is still active,
-and by the AI worker to write analysis rows independently.
-"""
 
 from __future__ import annotations
 
@@ -68,7 +63,7 @@ def chunks(rows: List[Dict[str, Any]], size: int) -> Iterable[List[Dict[str, Any
 
 
 def create_supabase_client() -> Any:
-    from supabase import create_client  # type: ignore
+    from supabase import create_client
 
     supabase_url = env_str("SUPABASE_URL")
     supabase_key = env_str("SUPABASE_SERVICE_ROLE_KEY") or env_str("SUPABASE_KEY")

@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Local HTTP API for launching the AI Media Watch parser from the frontend."""
 
 from __future__ import annotations
 

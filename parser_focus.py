@@ -1,19 +1,5 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-AI Media Watch — SerpAPI Google + YouTube Data API + Telegram public parser + OpenAI analysis
 
-Что делает:
-1) Google Search через SerpAPI (engine=google). Yandex НЕ используется.
-2) Из результатов Google достаёт ссылки: Telegram, TikTok, Instagram Reels, landing pages, WhatsApp, YouTube.
-3) Находит Telegram usernames и парсит публичные Telegram preview страницы https://t.me/s/<channel>.
-4) YouTube ищет через твой YOUTUBE_API_KEY, забирает metadata + comments + optional transcript.
-5) Считает rule-based kz_score / risk_score / threat_type.
-6) В конце отправляет top candidates в OpenAI и сохраняет openai_risk_analysis.json.
-
-Запуск:
-.venv/bin/python main_serp_google_youtube_telegram_openai.py
-"""
 
 from __future__ import annotations
 
@@ -28,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urlparse, parse_qs, urljoin
+from urllib.parse import urlparse, urljoin
 
 try:
     import requests
@@ -43,9 +29,9 @@ except ImportError:
         return None
 
 try:
-    from bs4 import BeautifulSoup  # type: ignore
+    from bs4 import BeautifulSoup
 except ImportError:
-    BeautifulSoup = None  # type: ignore
+    BeautifulSoup = None
 
 load_dotenv(override=True)
 
@@ -53,10 +39,6 @@ SERPAPI_URL = "https://serpapi.com/search.json"
 YOUTUBE_API_BASE = "https://www.googleapis.com/youtube/v3"
 YOUTUBE_WATCH_BASE = "https://www.youtube.com/watch?v="
 
-
-# -----------------------------
-# ENV helpers
-# -----------------------------
 
 def env_str(name: str, default: str = "") -> str:
     return os.getenv(name, default).strip()
@@ -100,10 +82,6 @@ def mask_secret(value: str, left: int = 6, right: int = 4) -> str:
         return value[:2] + "..."
     return value[:left] + "..." + value[-right:]
 
-
-# -----------------------------
-# Scoring dictionaries
-# -----------------------------
 
 KZ_PATTERNS = [
     r"\bказахстан\b", r"\bkazakhstan\b", r"\bқазақстан\b", r"\bkz\b",
@@ -179,9 +157,7 @@ SOCIAL_PUBLIC_PAGE_PLATFORMS = {
     "instagram_reel", "instagram", "tiktok", "tiktok_video",
 }
 
-# Known / commonly listed legal bookmaker brands in Kazakhstan.
-# Important: this is a BRAND RECOGNITION list, not a guarantee that every link/ad using the brand is official.
-# A suspicious affiliate, mirror, fake account, bonus funnel, shortlink, or impersonation can still be risky.
+
 KZ_BOOKMAKER_BRANDS: Dict[str, List[str]] = {
     "Winline KZ": ["winline", "winline kz", "winline.kz", "винлайн"],
     "Tennisi KZ": ["tennisi", "tennisi kz", "tennisi.kz", "тенниси"],
@@ -235,10 +211,6 @@ BOOKMAKER_PROMO_TERMS = [
 ]
 
 
-# -----------------------------
-# Data class
-# -----------------------------
-
 @dataclass
 class Candidate:
     source_type: str
@@ -252,16 +224,16 @@ class Candidate:
     channel_name: str = ""
     channel_url: str = ""
     external_id: str = ""
-    links: List[str] = None  # type: ignore
-    comments: List[Dict[str, Any]] = None  # type: ignore
+    links: List[str] = None
+    comments: List[Dict[str, Any]] = None
     transcript: str = ""
-    raw: Dict[str, Any] = None  # type: ignore
+    raw: Dict[str, Any] = None
     kz_score: int = 0
-    kz_signals: List[str] = None  # type: ignore
+    kz_signals: List[str] = None
     risk_score: int = 0
-    risk_signals: List[str] = None  # type: ignore
-    bookmaker_brands: List[str] = None  # type: ignore
-    licensed_casinos: List[str] = None  # type: ignore
+    risk_signals: List[str] = None
+    bookmaker_brands: List[str] = None
+    licensed_casinos: List[str] = None
     threat_type: str = "Low Risk / Unknown"
     status: str = "Low Risk / Unknown"
     openai_analysis: Optional[Dict[str, Any]] = None
@@ -283,10 +255,6 @@ class Candidate:
             self.licensed_casinos = []
 
 
-# -----------------------------
-# Text + scoring helpers
-# -----------------------------
-
 def normalize_text(text: str) -> str:
     text = text or ""
     text = text.lower()
@@ -295,12 +263,11 @@ def normalize_text(text: str) -> str:
 
 
 def detect_kz_bookmakers(text: str) -> List[str]:
-    """Return known bookmaker brands mentioned in text."""
     t = normalize_text(text)
     found: List[str] = []
     for brand, aliases in KZ_BOOKMAKER_BRANDS.items():
         for alias in aliases:
-            # Use simple substring matching because aliases include mixed Latin/Cyrillic brand forms.
+
             if alias.lower() in t:
                 found.append(brand)
                 break
@@ -308,7 +275,6 @@ def detect_kz_bookmakers(text: str) -> List[str]:
 
 
 def detect_kz_licensed_casinos(text: str) -> List[str]:
-    """Return licensed Kazakhstan casino brands mentioned in text."""
     t = normalize_text(text)
     found: List[str] = []
     for brand, info in KZ_LICENSED_CASINOS.items():
@@ -458,18 +424,14 @@ def enrich_candidate_scores(c: Candidate) -> Candidate:
             c.risk_signals = sorted(set(c.risk_signals))[:80]
             return c
 
-    # Known KZ bookmaker brand recognition.
-    # This does NOT make the item automatically safe. It helps separate:
-    # - known/regulated brand promo
-    # - unofficial affiliate promo
-    # - fake/mirror/impersonation
+
     c.bookmaker_brands = detect_kz_bookmakers(combined)
     if c.bookmaker_brands:
         c.risk_signals.extend(["known_kz_bookmaker_brand:" + b for b in c.bookmaker_brands])
         exclude_known = env_bool("EXCLUDE_KNOWN_BOOKMAKERS", True)
         if exclude_known:
-            # User strategy: do not prioritize licensed/known KZ bookmakers.
-            # We still store the item, but downgrade it so OpenAI/dashboard can ignore it.
+
+
             c.risk_signals.append("excluded_known_kz_bookmaker")
             c.threat_type = "Known KZ Bookmaker / Excluded"
             c.status = "Excluded / Known KZ Bookmaker"
@@ -491,10 +453,6 @@ def enrich_candidate_scores(c: Candidate) -> Candidate:
     c.status = status_from_scores(c.kz_score, c.risk_score)
     return c
 
-
-# -----------------------------
-# URL helpers
-# -----------------------------
 
 def classify_platform(url: str) -> str:
     u = url.lower()
@@ -577,7 +535,6 @@ def is_landing_page_candidate(c: Candidate) -> bool:
 
 
 def extract_public_page_metadata(url: str, html: str, max_script_chars: int = 6000) -> Dict[str, Any]:
-    """Extract metadata/caption-like text from public social and landing pages."""
     if BeautifulSoup is None:
         return {"title": "", "description": "", "links": [], "script_text": ""}
 
@@ -692,10 +649,6 @@ def parse_public_web_page(source: Candidate, delay: float, source_type: str) -> 
     return enrich_candidate_scores(c)
 
 
-# -----------------------------
-# SerpAPI Google Search
-# -----------------------------
-
 def serpapi_google_search(api_key: str, query: str, num: int, gl: str, hl: str, tbs: str = "") -> Dict[str, Any]:
     params = {
         "engine": "google",
@@ -764,7 +717,7 @@ def candidates_from_serpapi_google(query: str, data: Dict[str, Any]) -> List[Can
         )
         candidates.append(enrich_candidate_scores(c))
 
-    # Sometimes Google SERP contains video blocks.
+
     for block_name in ["video_results", "inline_videos"]:
         for item in data.get(block_name, []) or []:
             url = item.get("link", "") or ""
@@ -789,10 +742,6 @@ def candidates_from_serpapi_google(query: str, data: Dict[str, Any]) -> List[Can
 
     return candidates
 
-
-# -----------------------------
-# Telegram public parser
-# -----------------------------
 
 def parse_telegram_public_channel(username: str, posts_limit: int, delay: float) -> List[Candidate]:
     if BeautifulSoup is None:
@@ -847,10 +796,6 @@ def parse_telegram_public_channel(username: str, posts_limit: int, delay: float)
         time.sleep(delay)
     return candidates
 
-
-# -----------------------------
-# YouTube API
-# -----------------------------
 
 def youtube_get(endpoint: str, params: Dict[str, Any], api_key: str, retries: int = 2) -> Dict[str, Any]:
     url = f"{YOUTUBE_API_BASE}/{endpoint.lstrip('/')}"
@@ -955,7 +900,7 @@ def get_transcript_text(video_id: str, enabled: bool) -> str:
     if not enabled:
         return ""
     try:
-        from youtube_transcript_api import YouTubeTranscriptApi  # type: ignore
+        from youtube_transcript_api import YouTubeTranscriptApi
     except ImportError:
         return ""
     try:
@@ -1001,10 +946,6 @@ def build_youtube_candidate(query: str, detail: Dict[str, Any], comments: List[D
     return enrich_candidate_scores(c)
 
 
-# -----------------------------
-# OpenAI analysis
-# -----------------------------
-
 def openai_analyze_candidates(
     candidates: List[Candidate],
     output_json: str,
@@ -1012,26 +953,12 @@ def openai_analyze_candidates(
     max_items: int,
     batch_size: int = 100,
 ) -> List[Dict[str, Any]]:
-    """Analyze candidates with OpenAI, optionally in parallel.
-
-    Speed controls from .env:
-      OPENAI_CONCURRENCY=1..10       number of parallel OpenAI requests
-      OPENAI_MAX_RETRIES=3          retry count per candidate
-      OPENAI_TEXT_LIMIT=3500        candidate text chars sent to OpenAI
-      OPENAI_TRANSCRIPT_LIMIT=2500  transcript chars sent to OpenAI
-      OPENAI_COMMENTS_LIMIT=2000    comments chars sent to OpenAI
-      OPENAI_MIN_RISK_SCORE=0       only analyze candidates at/above this risk
-      OPENAI_MIN_KZ_SCORE=0         if set, prefer KZ-relevant candidates; global high-risk still passes
-
-    If analyzed items <= batch_size, writes one JSON file to output_json.
-    If analyzed items > batch_size, writes part files and output_json as an index.
-    """
     api_key = env_str("OPENAI_API_KEY")
     if not api_key:
         print("[WARN] OPENAI_API_KEY пустой — OpenAI analysis skipped")
         return []
     try:
-        from openai import OpenAI  # type: ignore
+        from openai import OpenAI
     except ImportError:
         print("[WARN] openai package not installed — OpenAI analysis skipped")
         return []
@@ -1240,10 +1167,6 @@ links:
     return results
 
 
-# -----------------------------
-# Main helpers
-# -----------------------------
-
 def default_google_queries() -> List[str]:
     return [
         'site:t.me/s "Казахстан" "гарантированный доход"',
@@ -1354,8 +1277,7 @@ def main() -> None:
     openai_max_items = env_int("OPENAI_MAX_ITEMS", 20)
     openai_batch_size = env_int("OPENAI_BATCH_SIZE", 100)
 
-    # Run history mode: every parser run is saved into its own folder.
-    # This prevents accidental overwriting of previous JSON files.
+
     save_run_history = env_bool("SAVE_RUN_HISTORY", True)
     output_dir = env_str("OUTPUT_DIR", "runs")
     run_id = env_str("RUN_ID", "auto")
@@ -1434,7 +1356,7 @@ def main() -> None:
     raw_youtube_search_items: List[Dict[str, Any]] = []
     raw_youtube_details: Dict[str, Dict[str, Any]] = {}
 
-    # 1) Google web discovery through SerpAPI only. No Yandex.
+
     if enable_serpapi_google:
         for q in google_queries[:max_google_queries]:
             print(f"\n🔎 SerpAPI Google Search: {q}")
@@ -1451,9 +1373,7 @@ def main() -> None:
             if delay > 0:
                 time.sleep(delay)
 
-    # 1b) Public page metadata/caption parsing for discovered Instagram Reels, TikToks,
-    # Google Sites/forms and risky landing pages. This is best-effort: platforms can
-    # hide captions behind JS/login, but public OG/JSON-LD often carries useful text.
+
     if enable_social_page_parse:
         social_seeds = [c for c in all_candidates if is_social_public_page_candidate(c)]
         social_seeds = dedupe_candidates(social_seeds)[:max_social_pages]
@@ -1483,7 +1403,7 @@ def main() -> None:
                 print(f"    parsed risk={parsed.risk_score} kz={parsed.kz_score} links={len(parsed.links)}")
                 stream_candidates("landing_public_page", [parsed])
 
-    # 2) Telegram public parsing from discovered usernames.
+
     if enable_telegram:
         text_blob = "\n".join([c.url + "\n" + c.snippet + "\n" + "\n".join(c.links) for c in all_candidates])
         usernames = extract_telegram_usernames(text_blob)[:max_telegram_channels]
@@ -1495,7 +1415,7 @@ def main() -> None:
             print(f"    posts parsed: {len(posts)}")
             stream_candidates("telegram_public_post", posts)
 
-    # 3) YouTube official API search + details + comments.
+
     if enable_youtube:
         youtube_search_items: List[Dict[str, Any]] = []
         seen_vids = set()
@@ -1537,7 +1457,7 @@ def main() -> None:
             if delay > 0:
                 time.sleep(delay)
 
-    # 4) Sort and save results.
+
     all_candidates = dedupe_candidates(all_candidates)
     all_candidates_sorted = sorted(
         all_candidates,
