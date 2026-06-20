@@ -1,0 +1,6 @@
+beautifulsoup4==4.15.0
+openai==2.43.0
+python-dotenv==1.2.2
+requests==2.34.2
+supabase==2.31.0
+youtube-transcript-api==1.2.4
