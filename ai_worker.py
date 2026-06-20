@@ -1,13 +1,3 @@
-#!/usr/bin/env python3
-"""AI analysis worker for streamed AI Media Watch candidates.
-
-Run once:
-  AI_WORKER_ONCE=true .venv/bin/python ai_worker.py
-
-Run continuously:
-  .venv/bin/python ai_worker.py
-"""
-
 from __future__ import annotations
 
 import json
