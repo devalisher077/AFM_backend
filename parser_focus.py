@@ -896,24 +896,106 @@ def youtube_comments(api_key: str, video_id: str, max_comments: int) -> List[Dic
     return comments
 
 
-def get_transcript_text(video_id: str, enabled: bool) -> str:
-    if not enabled:
+def parse_youtube_duration(value: str) -> Optional[int]:
+    if not value:
+        return None
+    match = re.fullmatch(
+        r"PT(?:(?P<hours>\d+)H)?(?:(?P<minutes>\d+)M)?(?:(?P<seconds>\d+)S)?",
+        value,
+    )
+    if not match:
+        return None
+    hours = int(match.group("hours") or 0)
+    minutes = int(match.group("minutes") or 0)
+    seconds = int(match.group("seconds") or 0)
+    return hours * 3600 + minutes * 60 + seconds
+
+
+def format_timecode(seconds: Any) -> str:
+    try:
+        total = max(0, int(float(seconds or 0)))
+    except Exception:
+        total = 0
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
+
+
+def build_video_timeline_context(raw: Dict[str, Any]) -> str:
+    if not isinstance(raw, dict):
         return ""
+    segments = raw.get("transcript_segments") or []
+    if not isinstance(segments, list) or not segments:
+        return ""
+
+    max_minutes = max(1, env_int("OPENAI_VIDEO_TIMELINE_MINUTES", 20))
+    max_chars_per_minute = max(120, env_int("OPENAI_VIDEO_TIMELINE_CHARS_PER_MINUTE", 600))
+    buckets: Dict[int, List[str]] = {}
+    for segment in segments:
+        if not isinstance(segment, dict):
+            continue
+        try:
+            start = int(float(segment.get("start_second") or 0))
+        except Exception:
+            start = 0
+        minute_start = (start // 60) * 60
+        text = str(segment.get("text") or "").replace("\n", " ").strip()
+        if text:
+            buckets.setdefault(minute_start, []).append(text)
+
+    lines: List[str] = []
+    for minute_start in sorted(buckets.keys())[:max_minutes]:
+        minute_end = minute_start + 60
+        text = " ".join(buckets[minute_start]).strip()
+        if len(text) > max_chars_per_minute:
+            text = text[:max_chars_per_minute].rsplit(" ", 1)[0].strip() + "..."
+        lines.append(f"{format_timecode(minute_start)}-{format_timecode(minute_end)} | 60s | {text}")
+    return "\n".join(lines)
+
+
+def get_transcript_data(video_id: str, enabled: bool) -> Tuple[str, List[Dict[str, Any]]]:
+    if not enabled:
+        return "", []
     try:
         from youtube_transcript_api import YouTubeTranscriptApi
     except ImportError:
-        return ""
+        return "", []
     try:
         transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=["ru", "kk", "en"])
-        return " ".join([x.get("text", "") for x in transcript]).strip()
+        segments: List[Dict[str, Any]] = []
+        for x in transcript:
+            text = str(x.get("text", "")).replace("\n", " ").strip()
+            if not text:
+                continue
+            start = float(x.get("start") or 0)
+            duration = float(x.get("duration") or 0)
+            segments.append({
+                "start_second": round(start, 2),
+                "end_second": round(start + duration, 2),
+                "duration_seconds": round(duration, 2),
+                "timecode": format_timecode(start),
+                "text": text,
+            })
+        text = " ".join([x["text"] for x in segments]).strip()
+        return text, segments
     except Exception:
-        return ""
+        return "", []
 
 
-def build_youtube_candidate(query: str, detail: Dict[str, Any], comments: List[Dict[str, Any]], transcript: str) -> Candidate:
+def build_youtube_candidate(
+    query: str,
+    detail: Dict[str, Any],
+    comments: List[Dict[str, Any]],
+    transcript: str,
+    transcript_segments: Optional[List[Dict[str, Any]]] = None,
+) -> Candidate:
     video_id = detail.get("id", "")
     snippet = detail.get("snippet", {})
     stats = detail.get("statistics", {})
+    content_details = detail.get("contentDetails", {})
+    duration_seconds = parse_youtube_duration(str(content_details.get("duration") or ""))
     title = snippet.get("title", "")
     description = snippet.get("description", "")
     channel_title = snippet.get("channelTitle", "")
@@ -939,7 +1021,10 @@ def build_youtube_candidate(query: str, detail: Dict[str, Any], comments: List[D
         raw={
             "video_id": video_id,
             "statistics": stats,
-            "contentDetails": detail.get("contentDetails", {}),
+            "contentDetails": content_details,
+            "duration_seconds": duration_seconds,
+            "duration_label": format_timecode(duration_seconds),
+            "transcript_segments": transcript_segments or [],
             "thumbnails": snippet.get("thumbnails", {}),
         },
     )
@@ -995,11 +1080,15 @@ def openai_analyze_candidates(
 
     def build_prompt(c: Candidate) -> str:
         comments_text = "\n".join(["- " + str(x.get("text", "")) for x in c.comments[:10]])
+        video_timeline = build_video_timeline_context(c.raw or {})
+        video_duration = (c.raw or {}).get("duration_label") or (c.raw or {}).get("duration_seconds") or ""
         return f"""
 Ты — аналитик AI Media Watch для Казахстана.
 Проанализируй candidate на признаки: финансовая пирамида, незаконное казино/ставки, scam investment, crypto referral, AI income bot, possible deepfake context.
 Отличай прямую рекламу/воронку от новостей, фильмов и образовательного контента.
 Важно: без прямых доказательств не утверждай окончательно "это финансовая пирамида"; формулируй как "признаки/паттерн, требуется проверка".
+Если candidate — видео и дан video_timeline_by_minute, верни поминутные video_frames: каждый frame должен описывать, о чем этот отрезок, его time_range и duration_seconds.
+Все текстовые значения в ответе пиши на русском языке: threat_type, key_signals, video_frames.summary, video_frames.risk_signals, reasoning_short и recommended_action.
 
 Верни ТОЛЬКО JSON:
 {{
@@ -1009,6 +1098,9 @@ def openai_analyze_candidates(
   "is_false_positive": true/false,
   "confidence": 0-100,
   "key_signals": ["..."],
+  "video_frames": [
+    {{"time_range": "00:00-01:00", "start_second": 0, "end_second": 60, "duration_seconds": 60, "summary": "...", "risk_signals": ["..."]}}
+  ],
   "reasoning_short": "...",
   "recommended_action": "Ignore / Monitor / Review / Escalate"
 }}
@@ -1020,6 +1112,7 @@ url: {c.url}
 title: {c.title}
 channel: {c.channel_name}
 published_at: {c.published_at}
+video_duration: {video_duration}
 rule_based_risk: {c.risk_score}
 rule_based_kz: {c.kz_score}
 known_kz_bookmaker_brands_detected: {json.dumps(c.bookmaker_brands, ensure_ascii=False)}
@@ -1033,6 +1126,9 @@ text:
 
 transcript:
 {(c.transcript or '')[:transcript_limit]}
+
+video_timeline_by_minute:
+{video_timeline}
 
 comments:
 {comments_text[:comments_limit]}
@@ -1449,8 +1545,8 @@ def main() -> None:
             title = detail.get("snippet", {}).get("title", "")
             print(f"  [{idx}/{len(youtube_search_items)}] {vid}: {title[:80]}")
             comments = youtube_comments(youtube_key, vid, max_comments)
-            transcript = get_transcript_text(vid, enable_transcript)
-            c = build_youtube_candidate(it.get("_query", ""), detail, comments, transcript)
+            transcript, transcript_segments = get_transcript_data(vid, enable_transcript)
+            c = build_youtube_candidate(it.get("_query", ""), detail, comments, transcript, transcript_segments)
             all_candidates.append(c)
             print(f"    risk={c.risk_score} kz={c.kz_score} comments={len(comments)} transcript_len={len(transcript)}")
             stream_candidates("youtube_api_video", [c])

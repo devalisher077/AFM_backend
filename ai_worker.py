@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -31,6 +32,80 @@ KZ_LICENSED_CASINO_REFERENCE = {
     "Makao": {"location": "Конаев, ул. Индустриальная, 2А", "operator": "ТОО «РК МАКАО»"},
     "Montana": {"location": "Конаев, ул. Индустриальная, 4", "operator": "ТОО «BESTAM CORPORATION»"},
 }
+
+
+def format_timecode(seconds: Any) -> str:
+    try:
+        total = max(0, int(float(seconds or 0)))
+    except Exception:
+        total = 0
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
+
+
+def parse_youtube_duration(value: str) -> Optional[int]:
+    if not value:
+        return None
+    match = re.fullmatch(
+        r"PT(?:(?P<hours>\d+)H)?(?:(?P<minutes>\d+)M)?(?:(?P<seconds>\d+)S)?",
+        value,
+    )
+    if not match:
+        return None
+    hours = int(match.group("hours") or 0)
+    minutes = int(match.group("minutes") or 0)
+    seconds = int(match.group("seconds") or 0)
+    return hours * 3600 + minutes * 60 + seconds
+
+
+def video_duration_label(raw: Dict[str, Any]) -> str:
+    if not isinstance(raw, dict):
+        return ""
+    if raw.get("duration_label"):
+        return str(raw.get("duration_label"))
+    if raw.get("duration_seconds") is not None:
+        return format_timecode(raw.get("duration_seconds"))
+    content_details = raw.get("contentDetails") or {}
+    if isinstance(content_details, dict):
+        parsed = parse_youtube_duration(str(content_details.get("duration") or ""))
+        if parsed is not None:
+            return format_timecode(parsed)
+    return ""
+
+
+def build_video_timeline_context(raw: Dict[str, Any]) -> str:
+    if not isinstance(raw, dict):
+        return ""
+    segments = raw.get("transcript_segments") or []
+    if not isinstance(segments, list) or not segments:
+        return ""
+
+    max_minutes = max(1, env_int("OPENAI_VIDEO_TIMELINE_MINUTES", 20))
+    max_chars_per_minute = max(120, env_int("OPENAI_VIDEO_TIMELINE_CHARS_PER_MINUTE", 600))
+    buckets: Dict[int, List[str]] = {}
+    for segment in segments:
+        if not isinstance(segment, dict):
+            continue
+        try:
+            start = int(float(segment.get("start_second") or 0))
+        except Exception:
+            start = 0
+        minute_start = (start // 60) * 60
+        text = str(segment.get("text") or "").replace("\n", " ").strip()
+        if text:
+            buckets.setdefault(minute_start, []).append(text)
+
+    lines: List[str] = []
+    for minute_start in sorted(buckets.keys())[:max_minutes]:
+        minute_end = minute_start + 60
+        text = " ".join(buckets[minute_start]).strip()
+        if len(text) > max_chars_per_minute:
+            text = text[:max_chars_per_minute].rsplit(" ", 1)[0].strip() + "..."
+        lines.append(f"{format_timecode(minute_start)}-{format_timecode(minute_end)} | 60s | {text}")
+    return "\n".join(lines)
 
 
 def load_openai_client() -> Any:
@@ -111,12 +186,17 @@ def build_prompt(item: Dict[str, Any]) -> str:
     if not isinstance(comments, list):
         comments = []
     comments_text = "\n".join(["- " + str(x.get("text", "")) for x in comments[:10] if isinstance(x, dict)])
+    raw = item.get("raw") or {}
+    video_timeline = build_video_timeline_context(raw if isinstance(raw, dict) else {})
+    duration_label = video_duration_label(raw if isinstance(raw, dict) else {})
 
     return f"""
 Ты — аналитик AI Media Watch для Казахстана.
 Проанализируй candidate на признаки: финансовая пирамида, незаконное казино/ставки, scam investment, crypto referral, AI income bot, possible deepfake context.
 Отличай прямую рекламу/воронку от новостей, фильмов и образовательного контента.
 Важно: без прямых доказательств не утверждай окончательно "это финансовая пирамида"; формулируй как "признаки/паттерн, требуется проверка".
+Если candidate — видео и дан video_timeline_by_minute, верни поминутные video_frames: каждый frame должен описывать, о чем этот отрезок, его time_range и duration_seconds.
+Все текстовые значения в ответе пиши на русском языке: threat_type, key_signals, video_frames.summary, video_frames.risk_signals, reasoning_short и recommended_action.
 
 Верни ТОЛЬКО JSON:
 {{
@@ -126,6 +206,9 @@ def build_prompt(item: Dict[str, Any]) -> str:
   "is_false_positive": true/false,
   "confidence": 0-100,
   "key_signals": ["..."],
+  "video_frames": [
+    {{"time_range": "00:00-01:00", "start_second": 0, "end_second": 60, "duration_seconds": 60, "summary": "...", "risk_signals": ["..."]}}
+  ],
   "reasoning_short": "...",
   "recommended_action": "Ignore / Monitor / Review / Escalate"
 }}
@@ -137,6 +220,7 @@ url: {item.get("url")}
 title: {item.get("title")}
 channel: {item.get("channel_name")}
 published_at: {item.get("published_at")}
+video_duration: {duration_label}
 rule_based_risk: {item.get("risk_score")}
 rule_based_kz: {item.get("kz_score")}
 known_kz_bookmaker_brands_detected: {json.dumps(item.get("bookmaker_brands") or [], ensure_ascii=False)}
@@ -150,6 +234,9 @@ text:
 
 transcript:
 {(item.get("transcript") or "")[:transcript_limit]}
+
+video_timeline_by_minute:
+{video_timeline}
 
 comments:
 {comments_text[:comments_limit]}
