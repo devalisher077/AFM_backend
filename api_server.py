@@ -75,6 +75,7 @@ def start_parser() -> Dict[str, Any]:
         env = os.environ.copy()
         env.update(load_env_file(ENV_PATH))
         env["ENABLE_STREAM_UPLOAD"] = "true"
+        env["ENABLE_LLM_ANALYSIS"] = env.get("ENABLE_LLM_ANALYSIS", "false")
         env["ENABLE_OPENAI_ANALYSIS"] = env.get("ENABLE_OPENAI_ANALYSIS", "false")
 
         script = ROOT / env.get("PIPELINE_SCRIPT", "run_streaming_pipeline.py")

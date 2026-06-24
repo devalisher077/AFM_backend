@@ -50,6 +50,7 @@ def main() -> None:
 
     env = os.environ.copy()
     env["ENABLE_STREAM_UPLOAD"] = "true"
+    env["ENABLE_LLM_ANALYSIS"] = "false"
     env["ENABLE_OPENAI_ANALYSIS"] = "false"
     env.setdefault("AI_WORKER_ONCE", "false")
 
@@ -81,6 +82,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-
     signal.signal(signal.SIGINT, signal.default_int_handler)
     main()

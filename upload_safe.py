@@ -112,7 +112,10 @@ def resolve_run_paths() -> Tuple[str, Path, Path, Optional[Path], Optional[Path]
         run_id = run_dir.name
         results_path = run_dir / env_str("OUTPUT_JSON", "ai_media_watch_results.json")
         raw_path = run_dir / env_str("RAW_OUTPUT_JSON", "ai_media_watch_raw.json")
-        openai_path = run_dir / env_str("OPENAI_OUTPUT_JSON", "openai_risk_analysis.json")
+        openai_path = run_dir / env_str("LLM_OUTPUT_JSON", env_str("OPENAI_OUTPUT_JSON", "llm_risk_analysis.json"))
+        if not openai_path.exists():
+            legacy_path = run_dir / env_str("OPENAI_OUTPUT_JSON", "openai_risk_analysis.json")
+            openai_path = legacy_path
         if not openai_path.exists():
             openai_path = None
         return run_id, results_path, raw_path, openai_path, latest_json
@@ -122,14 +125,14 @@ def resolve_run_paths() -> Tuple[str, Path, Path, Optional[Path], Optional[Path]
         run_id = str(latest.get("run_id") or Path(str(latest.get("run_dir", "unknown"))).name)
         results_path = Path(str(latest.get("results_json")))
         raw_path = Path(str(latest.get("raw_json"))) if latest.get("raw_json") else Path("")
-        openai_path = Path(str(latest.get("openai_json"))) if latest.get("openai_json") else None
+        analysis_path = latest.get("llm_json") or latest.get("openai_json")
+        openai_path = Path(str(analysis_path)) if analysis_path else None
         return run_id, results_path, raw_path, openai_path, latest_json
 
     if strict_latest:
         print(f"[ERROR] STRICT_LATEST_RUN=true and latest pointer not found: {latest_json}")
         print("Parser did not create a new latest_run.json, so upload is stopped to avoid sending old data.")
         sys.exit(1)
-
 
     auto_run_dir = find_latest_run_dir(output_dir)
     if auto_run_dir:
@@ -138,7 +141,10 @@ def resolve_run_paths() -> Tuple[str, Path, Path, Optional[Path], Optional[Path]
         print(f"[AUTO] Using newest run folder instead: {auto_run_dir}")
         results_path = auto_run_dir / env_str("OUTPUT_JSON", "ai_media_watch_results.json")
         raw_path = auto_run_dir / env_str("RAW_OUTPUT_JSON", "ai_media_watch_raw.json")
-        openai_path = auto_run_dir / env_str("OPENAI_OUTPUT_JSON", "openai_risk_analysis.json")
+        openai_path = auto_run_dir / env_str("LLM_OUTPUT_JSON", env_str("OPENAI_OUTPUT_JSON", "llm_risk_analysis.json"))
+        if not openai_path.exists():
+            legacy_path = auto_run_dir / env_str("OPENAI_OUTPUT_JSON", "openai_risk_analysis.json")
+            openai_path = legacy_path
         if not openai_path.exists():
             openai_path = None
 
@@ -149,6 +155,7 @@ def resolve_run_paths() -> Tuple[str, Path, Path, Optional[Path], Optional[Path]
             "results_json": str(results_path),
             "raw_json": str(raw_path),
             "openai_json": str(openai_path) if openai_path else None,
+            "llm_json": str(openai_path) if openai_path else None,
         }
         latest_json.parent.mkdir(parents=True, exist_ok=True)
         with open(latest_json, "w", encoding="utf-8") as f:
@@ -176,7 +183,7 @@ def load_openai_items(openai_path: Optional[Path]) -> Tuple[str, List[Dict[str, 
             if not part_path.exists():
                 part_path = openai_path.parent / Path(str(file_value)).name
             if not part_path.exists():
-                print(f"[WARN] OpenAI part file not found: {file_value}")
+                print(f"[WARN] LLM part file not found: {file_value}")
                 continue
             part = load_json(part_path)
             if not model:
@@ -192,7 +199,6 @@ def build_rows(run_id: str, results: Dict[str, Any], model: str, openai_items: L
     media_rows: List[Dict[str, Any]] = []
     run_item_rows: List[Dict[str, Any]] = []
     analysis_rows: List[Dict[str, Any]] = []
-
 
     for idx, item in enumerate(results.get("items", []), start=1):
         h = item_key(item)
@@ -246,7 +252,7 @@ def build_rows(run_id: str, results: Dict[str, Any], model: str, openai_items: L
 
     for ai in openai_items:
         h = item_key(ai)
-        analysis = ai.get("openai_analysis") or {}
+        analysis = ai.get("llm_analysis") or ai.get("openai_analysis") or {}
         analysis_rows.append({
             "url_hash": h,
             "run_id": run_id,

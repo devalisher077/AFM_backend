@@ -33,6 +33,8 @@ try:
 except ImportError:
     BeautifulSoup = None
 
+from local_llm import load_local_llm, local_model_name
+
 load_dotenv(override=True)
 
 SERPAPI_URL = "https://serpapi.com/search.json"
@@ -946,27 +948,21 @@ def build_youtube_candidate(query: str, detail: Dict[str, Any], comments: List[D
     return enrich_candidate_scores(c)
 
 
-def openai_analyze_candidates(
+def llm_analyze_candidates(
     candidates: List[Candidate],
     output_json: str,
     model: str,
     max_items: int,
     batch_size: int = 100,
 ) -> List[Dict[str, Any]]:
-    api_key = env_str("OPENAI_API_KEY")
-    if not api_key:
-        print("[WARN] OPENAI_API_KEY пустой — OpenAI analysis skipped")
-        return []
     try:
-        from openai import OpenAI
-    except ImportError:
-        print("[WARN] openai package not installed — OpenAI analysis skipped")
+        client = load_local_llm()
+    except Exception as e:
+        print(f"[WARN] Local LLM analysis skipped: {e}")
         return []
 
-    client = OpenAI(api_key=api_key)
-
-    min_risk_score = max(0, env_int("OPENAI_MIN_RISK_SCORE", 0))
-    min_kz_score = max(0, env_int("OPENAI_MIN_KZ_SCORE", 0))
+    min_risk_score = max(0, env_int("LLM_MIN_RISK_SCORE", env_int("OPENAI_MIN_RISK_SCORE", 0)))
+    min_kz_score = max(0, env_int("LLM_MIN_KZ_SCORE", env_int("OPENAI_MIN_KZ_SCORE", 0)))
     global_high_risk_floor = max(70, min_risk_score)
 
     filtered_candidates = [
@@ -981,17 +977,17 @@ def openai_analyze_candidates(
         selected = sorted_candidates
 
     batch_size = max(1, int(batch_size or 100))
-    concurrency = max(1, env_int("OPENAI_CONCURRENCY", 1))
-    max_retries = max(1, env_int("OPENAI_MAX_RETRIES", 3))
-    text_limit = max(500, env_int("OPENAI_TEXT_LIMIT", 3500))
-    transcript_limit = max(0, env_int("OPENAI_TRANSCRIPT_LIMIT", 2500))
-    comments_limit = max(0, env_int("OPENAI_COMMENTS_LIMIT", 2000))
+    concurrency = max(1, env_int("LOCAL_LLM_CONCURRENCY", env_int("LLM_CONCURRENCY", 1)))
+    max_retries = max(1, env_int("LOCAL_LLM_MAX_RETRIES", env_int("LLM_MAX_RETRIES", 2)))
+    text_limit = max(500, env_int("LLM_TEXT_LIMIT", env_int("OPENAI_TEXT_LIMIT", 3500)))
+    transcript_limit = max(0, env_int("LLM_TRANSCRIPT_LIMIT", env_int("OPENAI_TRANSCRIPT_LIMIT", 2500)))
+    comments_limit = max(0, env_int("LLM_COMMENTS_LIMIT", env_int("OPENAI_COMMENTS_LIMIT", 2000)))
 
     print(
-        f"  OpenAI filter: min_risk={min_risk_score} min_kz={min_kz_score} | "
+        f"  Local LLM filter: min_risk={min_risk_score} min_kz={min_kz_score} | "
         f"eligible={len(filtered_candidates)}/{len(candidates)}"
     )
-    print(f"  OpenAI selected: {len(selected)} | concurrency={concurrency} | batch_size={batch_size}")
+    print(f"  Local LLM selected: {len(selected)} | concurrency={concurrency} | batch_size={batch_size}")
 
     def build_prompt(c: Candidate) -> str:
         comments_text = "\n".join(["- " + str(x.get("text", "")) for x in c.comments[:10]])
@@ -1047,15 +1043,7 @@ links:
         last_error = ""
         for attempt in range(1, max_retries + 1):
             try:
-                resp = client.responses.create(
-                    model=model,
-                    input=[{"role": "user", "content": prompt}],
-                )
-                text = getattr(resp, "output_text", "") or ""
-                try:
-                    parsed = json.loads(text)
-                except Exception:
-                    parsed = {"raw_text": text[:4000]}
+                parsed = client.analyze_prompt(prompt)
                 return {
                     "rank": idx,
                     "url": c.url,
@@ -1065,6 +1053,7 @@ links:
                     "rule_based_risk": c.risk_score,
                     "rule_based_kz": c.kz_score,
                     "openai_analysis": parsed,
+                    "llm_analysis": parsed,
                 }
             except Exception as e:
                 last_error = str(e)
@@ -1087,7 +1076,7 @@ links:
     if concurrency <= 1:
         for payload in indexed_candidates:
             idx, c = payload
-            print(f"  OpenAI {idx}/{len(selected)}: {c.platform} | risk={c.risk_score} kz={c.kz_score} | {c.title[:70]}")
+            print(f"  Local LLM {idx}/{len(selected)}: {c.platform} | risk={c.risk_score} kz={c.kz_score} | {c.title[:70]}")
             results.append(analyze_one(payload))
     else:
         done = 0
@@ -1098,7 +1087,7 @@ links:
                 results.append(result)
                 done += 1
                 status = "ERR" if result.get("error") else "OK"
-                print(f"  OpenAI done {done}/{len(selected)} [{status}] rank={result.get('rank')} | {str(result.get('title', ''))[:65]}")
+                print(f"  Local LLM done {done}/{len(selected)} [{status}] rank={result.get('rank')} | {str(result.get('title', ''))[:65]}")
 
     results = sorted(results, key=lambda x: int(x.get("rank", 0)))
 
@@ -1113,14 +1102,16 @@ links:
             "generated_at": generated_at,
             "model": model,
             "sent_items_to_openai": len(results),
+            "sent_items_to_llm": len(results),
             "openai_concurrency": concurrency,
+            "llm_concurrency": concurrency,
             "batch_size": batch_size,
             "total_batches": 1,
             "items": results,
         }
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
-        print(f"  OpenAI output: one file → {output_path}")
+        print(f"  Local LLM output: one file -> {output_path}")
         return results
 
     part_files: List[str] = []
@@ -1137,32 +1128,36 @@ links:
             "part": batch_index + 1,
             "total_batches": total_batches,
             "openai_concurrency": concurrency,
+            "llm_concurrency": concurrency,
             "batch_size": batch_size,
             "range": {
                 "start_rank": chunk[0]["rank"] if chunk else None,
                 "end_rank": chunk[-1]["rank"] if chunk else None,
             },
             "sent_items_to_openai": len(chunk),
+            "sent_items_to_llm": len(chunk),
             "items": chunk,
         }
         with open(part_path, "w", encoding="utf-8") as f:
             json.dump(part_payload, f, ensure_ascii=False, indent=2)
         part_files.append(str(part_path))
-        print(f"  OpenAI output part {batch_index + 1}/{total_batches}: {part_path} | items={len(chunk)}")
+        print(f"  Local LLM output part {batch_index + 1}/{total_batches}: {part_path} | items={len(chunk)}")
 
     index_payload = {
         "generated_at": generated_at,
         "model": model,
         "sent_items_to_openai": len(results),
+        "sent_items_to_llm": len(results),
         "openai_concurrency": concurrency,
+        "llm_concurrency": concurrency,
         "batch_size": batch_size,
         "total_batches": total_batches,
-        "mode": "chunked_openai_analysis_index",
+        "mode": "chunked_local_llm_analysis_index",
         "files": part_files,
     }
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(index_payload, f, ensure_ascii=False, indent=2)
-    print(f"  OpenAI output index: {output_path}")
+    print(f"  Local LLM output index: {output_path}")
 
     return results
 
@@ -1233,13 +1228,11 @@ def dedupe_candidates(candidates: List[Candidate]) -> List[Candidate]:
 def main() -> None:
     serpapi_key = env_str("SERPAPI_KEY")
     youtube_key = env_str("YOUTUBE_API_KEY")
-    openai_key = env_str("OPENAI_API_KEY")
-
     enable_serpapi_google = env_bool("ENABLE_SERPAPI_GOOGLE", True)
     enable_youtube = env_bool("ENABLE_YOUTUBE_API", True)
     enable_telegram = env_bool("ENABLE_TELEGRAM_PUBLIC_PARSE", True)
     enable_transcript = env_bool("ENABLE_TRANSCRIPT", True)
-    enable_openai = env_bool("ENABLE_OPENAI_ANALYSIS", True)
+    enable_llm = env_bool("ENABLE_LLM_ANALYSIS", env_bool("ENABLE_OPENAI_ANALYSIS", True))
 
     if enable_serpapi_google and not serpapi_key:
         print("[ERROR] ENABLE_SERPAPI_GOOGLE=true, но SERPAPI_KEY пустой")
@@ -1272,10 +1265,10 @@ def main() -> None:
 
     output_json = env_str("OUTPUT_JSON", "ai_media_watch_results.json")
     raw_output_json = env_str("RAW_OUTPUT_JSON", "ai_media_watch_raw.json")
-    openai_output_json = env_str("OPENAI_OUTPUT_JSON", "openai_risk_analysis.json")
-    openai_model = env_str("OPENAI_MODEL", "gpt-4.1-mini")
-    openai_max_items = env_int("OPENAI_MAX_ITEMS", 20)
-    openai_batch_size = env_int("OPENAI_BATCH_SIZE", 100)
+    llm_output_json = env_str("LLM_OUTPUT_JSON", env_str("OPENAI_OUTPUT_JSON", "llm_risk_analysis.json"))
+    llm_model = local_model_name()
+    llm_max_items = env_int("LLM_MAX_ITEMS", env_int("OPENAI_MAX_ITEMS", 20))
+    llm_batch_size = env_int("LLM_BATCH_SIZE", env_int("OPENAI_BATCH_SIZE", 100))
 
 
     save_run_history = env_bool("SAVE_RUN_HISTORY", True)
@@ -1289,15 +1282,15 @@ def main() -> None:
         run_dir.mkdir(parents=True, exist_ok=True)
         output_json = str(run_dir / Path(output_json).name)
         raw_output_json = str(run_dir / Path(raw_output_json).name)
-        openai_output_json = str(run_dir / Path(openai_output_json).name)
+        llm_output_json = str(run_dir / Path(llm_output_json).name)
     else:
         run_id = "overwrite_mode"
 
-    print("🚀 AI Media Watch — SerpAPI Google + public social/landing pages + YouTube API + Telegram + OpenAI")
-    print(f"SerpAPI Google: {enable_serpapi_google} | Social page parse: {enable_social_page_parse} | Landing parse: {enable_landing_page_parse} | YouTube API: {enable_youtube} | Telegram parse: {enable_telegram} | OpenAI: {enable_openai}")
+    print("🚀 AI Media Watch — SerpAPI Google + public social/landing pages + YouTube API + Telegram + local Llama")
+    print(f"SerpAPI Google: {enable_serpapi_google} | Social page parse: {enable_social_page_parse} | Landing parse: {enable_landing_page_parse} | YouTube API: {enable_youtube} | Telegram parse: {enable_telegram} | Local LLM: {enable_llm}")
     print(f"SERPAPI_KEY: {mask_secret(serpapi_key)}")
     print(f"YOUTUBE_API_KEY: {mask_secret(youtube_key)}")
-    print(f"OPENAI_API_KEY: {mask_secret(openai_key)}")
+    print(f"LOCAL_LLM_MODEL: {llm_model}")
     if save_run_history:
         print(f"RUN_ID: {run_id}")
         print(f"RUN_DIR: {run_dir}")
@@ -1309,7 +1302,7 @@ def main() -> None:
     stream_paths = {
         "results_json_path": output_json,
         "raw_json_path": raw_output_json,
-        "openai_json_path": openai_output_json,
+        "openai_json_path": llm_output_json,
     }
     if enable_stream_upload:
         try:
@@ -1318,7 +1311,7 @@ def main() -> None:
             stream_writer = SupabaseStreamWriter(run_id)
             stream_writer.upsert_scan_run({
                 "generated_at": stream_now_iso(),
-                "mode": "serpapi_google_social_landing_youtube_api_telegram_openai_streaming",
+                "mode": "serpapi_google_social_landing_youtube_api_telegram_local_llm_streaming",
                 "run_id": run_id,
                 "run_dir": str(run_dir) if run_dir else None,
                 "save_run_history": save_run_history,
@@ -1329,7 +1322,8 @@ def main() -> None:
                     "enable_landing_page_parse": enable_landing_page_parse,
                     "enable_youtube_api": enable_youtube,
                     "enable_telegram_public_parse": enable_telegram,
-                    "enable_openai_analysis": enable_openai,
+                    "enable_openai_analysis": enable_llm,
+                    "enable_llm_analysis": enable_llm,
                 },
                 "google_queries_used": google_queries[:max_google_queries],
                 "youtube_queries_used": youtube_queries,
@@ -1471,7 +1465,7 @@ def main() -> None:
 
     summary = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "mode": "serpapi_google_social_landing_youtube_api_telegram_openai",
+        "mode": "serpapi_google_social_landing_youtube_api_telegram_local_llm",
         "run_id": run_id,
         "run_dir": str(run_dir) if run_dir else None,
         "save_run_history": save_run_history,
@@ -1491,7 +1485,8 @@ def main() -> None:
             "enable_youtube_api": enable_youtube,
             "enable_telegram_public_parse": enable_telegram,
             "enable_transcript": enable_transcript,
-            "enable_openai_analysis": enable_openai,
+            "enable_openai_analysis": enable_llm,
+            "enable_llm_analysis": enable_llm,
             "max_google_queries": max_google_queries,
             "google_results_per_query": google_results_per_query,
             "max_social_public_pages_to_parse": max_social_pages,
@@ -1513,17 +1508,18 @@ def main() -> None:
         except Exception as e:
             print(f"\n[WARN] Supabase final stream update failed: {e}")
 
-    openai_results: List[Dict[str, Any]] = []
-    if enable_openai:
-        print(f"\n🤖 OpenAI analysis for top {openai_max_items if openai_max_items > 0 else 'ALL'} candidates | batch size={openai_batch_size}")
-        openai_results = openai_analyze_candidates(all_candidates_sorted, openai_output_json, openai_model, openai_max_items, openai_batch_size)
-        print(f"  saved: {openai_output_json} | analyzed: {len(openai_results)}")
+    llm_results: List[Dict[str, Any]] = []
+    if enable_llm:
+        print(f"\n🤖 Local LLM analysis for top {llm_max_items if llm_max_items > 0 else 'ALL'} candidates | batch size={llm_batch_size}")
+        llm_results = llm_analyze_candidates(all_candidates_sorted, llm_output_json, llm_model, llm_max_items, llm_batch_size)
+        print(f"  saved: {llm_output_json} | analyzed: {len(llm_results)}")
 
     output = {
         "summary": summary,
         "items": [asdict(c) for c in all_candidates_sorted],
         "top_risk_candidates": [asdict(c) for c in all_candidates_sorted[:30]],
-        "openai_analysis_file": openai_output_json if openai_results else None,
+        "openai_analysis_file": llm_output_json if llm_results else None,
+        "llm_analysis_file": llm_output_json if llm_results else None,
     }
 
     raw_output = {
@@ -1542,8 +1538,8 @@ def main() -> None:
     print("\n✅ Done")
     print(f"Saved: {output_json}")
     print(f"Saved raw: {raw_output_json}")
-    if openai_results:
-        print(f"Saved OpenAI analysis: {openai_output_json}")
+    if llm_results:
+        print(f"Saved local LLM analysis: {llm_output_json}")
     print("\nSummary:")
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 

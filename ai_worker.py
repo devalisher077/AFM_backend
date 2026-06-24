@@ -15,6 +15,7 @@ except ImportError:
 
 load_dotenv(override=True)
 
+from local_llm import load_local_llm, local_model_name
 from supabase_stream import build_ai_analysis_row, create_supabase_client, env_bool, env_int, env_str, item_key
 
 
@@ -31,15 +32,6 @@ KZ_LICENSED_CASINO_REFERENCE = {
     "Makao": {"location": "Конаев, ул. Индустриальная, 2А", "operator": "ТОО «РК МАКАО»"},
     "Montana": {"location": "Конаев, ул. Индустриальная, 4", "operator": "ТОО «BESTAM CORPORATION»"},
 }
-
-
-def load_openai_client() -> Any:
-    api_key = env_str("OPENAI_API_KEY")
-    if not api_key:
-        raise RuntimeError("OPENAI_API_KEY is empty")
-    from openai import OpenAI
-
-    return OpenAI(api_key=api_key)
 
 
 def is_ai_eligible(item: Dict[str, Any], min_risk: int, min_kz: int) -> bool:
@@ -103,9 +95,9 @@ def fetch_run_ranks(client: Any, items: List[Dict[str, Any]]) -> Dict[str, Dict[
 
 
 def build_prompt(item: Dict[str, Any]) -> str:
-    text_limit = max(500, env_int("OPENAI_TEXT_LIMIT", 2500))
-    transcript_limit = max(0, env_int("OPENAI_TRANSCRIPT_LIMIT", 1200))
-    comments_limit = max(0, env_int("OPENAI_COMMENTS_LIMIT", 800))
+    text_limit = max(500, env_int("LLM_TEXT_LIMIT", env_int("OPENAI_TEXT_LIMIT", 2500)))
+    transcript_limit = max(0, env_int("LLM_TRANSCRIPT_LIMIT", env_int("OPENAI_TRANSCRIPT_LIMIT", 1200)))
+    comments_limit = max(0, env_int("LLM_COMMENTS_LIMIT", env_int("OPENAI_COMMENTS_LIMIT", 800)))
 
     comments = item.get("comments") or []
     if not isinstance(comments, list):
@@ -159,20 +151,12 @@ links:
 """.strip()
 
 
-def analyze_item(openai_client: Any, item: Dict[str, Any], model: str, max_retries: int) -> Dict[str, Any]:
+def analyze_item(llm_client: Any, item: Dict[str, Any], max_retries: int) -> Dict[str, Any]:
     prompt = build_prompt(item)
     last_error = ""
     for attempt in range(1, max_retries + 1):
         try:
-            resp = openai_client.responses.create(
-                model=model,
-                input=[{"role": "user", "content": prompt}],
-            )
-            text = getattr(resp, "output_text", "") or ""
-            try:
-                return json.loads(text)
-            except Exception:
-                return {"raw_text": text[:4000]}
+            return llm_client.analyze_prompt(prompt)
         except Exception as e:
             last_error = str(e)
             if attempt < max_retries:
@@ -180,7 +164,7 @@ def analyze_item(openai_client: Any, item: Dict[str, Any], model: str, max_retri
     return {"error": last_error}
 
 
-def process_batch(client: Any, openai_client: Any, items: List[Dict[str, Any]], model: str, concurrency: int, max_retries: int) -> int:
+def process_batch(client: Any, llm_client: Any, items: List[Dict[str, Any]], model: str, concurrency: int, max_retries: int) -> int:
     ranks = fetch_run_ranks(client, items)
 
     def one(item: Dict[str, Any]) -> Dict[str, Any]:
@@ -188,7 +172,7 @@ def process_batch(client: Any, openai_client: Any, items: List[Dict[str, Any]], 
         run_id = str(item.get("last_seen_run_id") or item.get("first_seen_run_id") or "")
         rank_row = ranks.get(url_hash) or {}
         rank = rank_row.get("rank")
-        analysis = analyze_item(openai_client, item, model, max_retries)
+        analysis = analyze_item(llm_client, item, max_retries)
         error = str(analysis.get("error") or "") if isinstance(analysis, dict) else ""
         if error:
             analysis = {}
@@ -212,26 +196,27 @@ def process_batch(client: Any, openai_client: Any, items: List[Dict[str, Any]], 
 
 
 def main() -> None:
-    model = env_str("OPENAI_MODEL", "gpt-4.1-mini")
-    batch_size = env_int("AI_WORKER_BATCH_SIZE", env_int("OPENAI_MAX_ITEMS", 20))
+    model = local_model_name()
+    single_item = env_bool("AI_WORKER_SINGLE_ITEM", False)
+    batch_size = 1 if single_item else env_int("AI_WORKER_BATCH_SIZE", env_int("LLM_MAX_ITEMS", env_int("OPENAI_MAX_ITEMS", 20)))
     pool_size = env_int("AI_WORKER_POOL_SIZE", max(batch_size * 5, 100))
     poll_seconds = env_int("AI_WORKER_POLL_SECONDS", 30)
-    run_once = env_bool("AI_WORKER_ONCE", False)
-    concurrency = max(1, env_int("OPENAI_CONCURRENCY", 1))
-    max_retries = max(1, env_int("OPENAI_MAX_RETRIES", 3))
-    min_risk = max(0, env_int("OPENAI_MIN_RISK_SCORE", 40))
-    min_kz = max(0, env_int("OPENAI_MIN_KZ_SCORE", 30))
+    run_once = env_bool("AI_WORKER_ONCE", single_item)
+    concurrency = max(1, env_int("LOCAL_LLM_CONCURRENCY", env_int("LLM_CONCURRENCY", 1)))
+    max_retries = max(1, env_int("LOCAL_LLM_MAX_RETRIES", env_int("LLM_MAX_RETRIES", 2)))
+    min_risk = max(0, env_int("LLM_MIN_RISK_SCORE", env_int("OPENAI_MIN_RISK_SCORE", 40)))
+    min_kz = max(0, env_int("LLM_MIN_KZ_SCORE", env_int("OPENAI_MIN_KZ_SCORE", 30)))
 
     try:
         client = create_supabase_client()
-        openai_client = load_openai_client()
+        llm_client = load_local_llm()
     except Exception as e:
         print(f"[ERROR] {e}")
         sys.exit(1)
 
-    print("🤖 AI Media Watch worker")
+    print("🤖 AI Media Watch worker — local Llama")
     print(f"model={model} batch={batch_size} pool={pool_size} concurrency={concurrency}")
-    print(f"filters: min_risk={min_risk} min_kz={min_kz} once={run_once}")
+    print(f"filters: min_risk={min_risk} min_kz={min_kz} once={run_once} single_item={single_item}")
 
     while True:
         try:
@@ -244,7 +229,7 @@ def main() -> None:
                 continue
 
             print(f"analyzing {len(items)} pending items")
-            done = process_batch(client, openai_client, items, model, concurrency, max_retries)
+            done = process_batch(client, llm_client, items, model, concurrency, max_retries)
             print(f"saved ai_analyses: {done}")
         except Exception as e:
             print(f"[WARN] worker loop failed: {e}")

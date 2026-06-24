@@ -58,11 +58,15 @@ def find_newest_run_dir_after(output_dir: str, started_at: float) -> Optional[Pa
 def create_latest_pointer_from_run_dir(run_dir: Path, latest_path: Path) -> None:
     output_json = os.getenv("OUTPUT_JSON", "ai_media_watch_results.json").strip() or "ai_media_watch_results.json"
     raw_output_json = os.getenv("RAW_OUTPUT_JSON", "ai_media_watch_raw.json").strip() or "ai_media_watch_raw.json"
-    openai_output_json = os.getenv("OPENAI_OUTPUT_JSON", "openai_risk_analysis.json").strip() or "openai_risk_analysis.json"
+    llm_output_json = (
+        os.getenv("LLM_OUTPUT_JSON")
+        or os.getenv("OPENAI_OUTPUT_JSON")
+        or "llm_risk_analysis.json"
+    ).strip() or "llm_risk_analysis.json"
 
     results_path = run_dir / output_json
     raw_path = run_dir / raw_output_json
-    openai_path = run_dir / openai_output_json
+    llm_path = run_dir / llm_output_json
 
     if not results_path.exists():
         raise FileNotFoundError(f"Cannot create latest pointer: results file not found: {results_path}")
@@ -73,7 +77,8 @@ def create_latest_pointer_from_run_dir(run_dir: Path, latest_path: Path) -> None
         "generated_at": now_iso(),
         "results_json": str(results_path),
         "raw_json": str(raw_path) if raw_path.exists() else None,
-        "openai_json": str(openai_path) if openai_path.exists() else None,
+        "openai_json": str(llm_path) if llm_path.exists() else None,
+        "llm_json": str(llm_path) if llm_path.exists() else None,
         "created_by": "run_pipeline_safe_v2.py fallback",
     }
 

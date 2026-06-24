@@ -6,3 +6,5 @@ __pycache__/
 downloads/
 frames/
 runs/
+models/*.gguf
+*.gguf
